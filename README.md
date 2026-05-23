@@ -13,6 +13,31 @@ provided, but the core implementation functions are left as `raise NotImplemente
 stubs for you to fill in. You work through the components bottom-up, verifying
 each one with the autograder before moving to the next.
 
+---
+
+## Branches
+
+| Branch | Purpose |
+|--------|---------|
+| `main` | Default branch — project overview and shared documentation |
+| `skeleton` | **Student starting point** — implementation stubs, per-component guides, and autograder tests |
+
+If you want to reimplement GPT-2 from scratch, check out the `skeleton` branch:
+
+```bash
+git clone git@github.com:alpardmason/learn-gpt2.git
+cd learn-gpt2
+git checkout skeleton
+uv venv --python 3.12
+uv sync --dev
+```
+
+Work on `skeleton` (or a branch off it, e.g. `git checkout -b my-gpt2`). The stubs
+raise `NotImplementedError` until you fill them in; use `guides/00_overview.md` as
+the task index.
+
+---
+
 **You will implement:**
 - GELU activation (tanh approximation)
 - Layer Normalization
