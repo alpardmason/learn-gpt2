@@ -19,22 +19,24 @@ each one with the autograder before moving to the next.
 
 | Branch | Purpose |
 |--------|---------|
-| `main` | Default branch — project overview and shared documentation |
-| `skeleton` | **Student starting point** — implementation stubs, per-component guides, and autograder tests |
+| `main` | **Active development** — ongoing GPT-2 reimplementation work lives here |
+| `skeleton` | **Frozen student starting point** — stubs, guides, and autograder tests (unchanged) |
 
-If you want to reimplement GPT-2 from scratch, check out the `skeleton` branch:
+**On `main`:** clone and work as usual — this is where implementation progress is tracked.
+
+**To reimplement from scratch** (same starting point every time), use the frozen `skeleton` branch:
 
 ```bash
 git clone git@github.com:alpardmason/learn-gpt2.git
 cd learn-gpt2
-git checkout skeleton
+git checkout skeleton          # frozen stubs — do not commit here
+# or branch off it:
+git checkout -b my-gpt2 skeleton
 uv venv --python 3.12
 uv sync --dev
 ```
 
-Work on `skeleton` (or a branch off it, e.g. `git checkout -b my-gpt2`). The stubs
-raise `NotImplementedError` until you fill them in; use `guides/00_overview.md` as
-the task index.
+Use `guides/00_overview.md` as the task index. Stubs raise `NotImplementedError` until you implement them.
 
 ---
 
