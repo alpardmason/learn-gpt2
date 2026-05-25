@@ -66,6 +66,9 @@ from gpt2.config import GPT2Config
 # ------------------------------------------------------------------------------
 
 
+_SQRT_2_OVER_PI = math.sqrt(2.0 / math.pi)
+
+
 class GELU(nn.Module):
     """
     Tanh-approximation GELU activation, as used in GPT-2.
@@ -92,11 +95,9 @@ class GELU(nn.Module):
         -------
         0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
         """
-        raise NotImplementedError(
-            "Task 4: Implement GELU.forward.\n"
-            "  Use: math.sqrt(2.0 / math.pi), torch.tanh, ** operator\n"
-            "  Reference: references/gpt-2/src/model.py  gelu(x)"
-        )
+        # Original:
+        # return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * (x**3))))
+        return 0.5 * x * (1 + torch.tanh(_SQRT_2_OVER_PI * (x + 0.044715 * x.pow(3))))
 
 
 # ===========================================================================
@@ -149,8 +150,8 @@ class LayerNorm(nn.Module):
         self.eps = eps
         # [best practice] Use nn.Parameter so PyTorch tracks these for
         # autograd and includes them in model.parameters().
-        self.weight = nn.Parameter(torch.ones(n_embd))   # γ (scale), init 1
-        self.bias = nn.Parameter(torch.zeros(n_embd))    # β (shift), init 0
+        self.weight = nn.Parameter(torch.ones(n_embd))  # γ (scale), init 1
+        self.bias = nn.Parameter(torch.zeros(n_embd))  # β (shift), init 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -584,8 +585,5 @@ class GPT2Model(nn.Module):
         """
         params = list(self.parameters())
         if exclude_embeddings:
-            params = [
-                p for n, p in self.named_parameters()
-                if "wte" not in n and "wpe" not in n
-            ]
+            params = [p for n, p in self.named_parameters() if "wte" not in n and "wpe" not in n]
         return sum(p.numel() for p in params)
