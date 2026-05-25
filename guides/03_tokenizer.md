@@ -1,4 +1,4 @@
-# Guide 03 — Tokenizer (BPE)
+# Guide 03 — Tokenizer (BPE from Scratch)
 
 ## Theory
 
@@ -22,6 +22,10 @@ Step 2:    merge ("w","er") → "wer"
 The `<|endoftext|>` token is inserted between documents in the training corpus
 so the model learns where documents begin and end.
 
+Production GPT-2 also applies a regex pre-tokenizer before BPE (see OpenAI's
+`encoder.py`) so merges respect word boundaries. Your task starts with a simpler
+byte-level pipeline; the full GPT-2 regex is an optional stretch goal.
+
 **Why not character-level or word-level?**
 - Word-level: vocabulary explodes for morphologically rich languages; can't
   handle unknown words (OOV problem).
@@ -36,54 +40,92 @@ so the model learns where documents begin and end.
    - Count all adjacent pairs. Which pair is most frequent?
    - After one merge, what does the vocabulary look like?
 
-2. Run `tiktoken.get_encoding("gpt2").encode("Hello")` and
-   `tiktoken.get_encoding("gpt2").encode(" Hello")` in a Python REPL.
-   Do they produce different IDs? Why?
+2. Why does byte-level BPE never need an `<UNK>` token?
 
-3. What is `tiktoken.get_encoding("gpt2").n_vocab`? Verify it equals 50257.
+3. After training on `"aaab aaab ab b" * 20` with 3 merges, encode `"aaab"`.
+   How many token IDs do you get? Fewer than 4? Why?
 
 ## Your Task
 
-Open `src/gpt2/tokenizer.py` and implement `BPETokenizer`:
+Open `src/gpt2/tokenizer.py` and implement `BPETokenizer` **from scratch** —
+no `tiktoken` wrapper. Follow the algorithm in the stub comments.
+
+### Algorithm overview
+
+**Training** (`train` / `from_corpus`):
+
+1. Convert the corpus to a list of byte token IDs (0–255).
+2. Count adjacent `(id, id)` pairs across the corpus.
+3. Merge the most frequent pair into a new token ID (256, 257, …).
+4. Repeat for `num_merges` steps.
+5. Store merge rules in order — merge rank matters at encode time.
+
+**Encoding** (`encode`):
+
+1. Convert text to byte IDs (0–255).
+2. Greedily apply learned merges in the order they were learned.
+3. Return the final token ID list.
+
+**Decoding** (`decode`):
+
+1. Map each token ID back to its byte sequence.
+2. Concatenate bytes and decode as UTF-8.
+
+### Methods to implement
 
 ```
 class BPETokenizer(Tokenizer):
-    def __init__(self) -> None:   ← Task 3
-    def encode(self, text) -> list[int]:   ← Task 3
-    def decode(self, ids) -> str:   ← Task 3
-    def vocab_size(self) -> int:   ← Task 3 (property)
+    def __init__(self) -> None:                          ← Task 3a
+    def from_corpus(cls, corpus, num_merges) -> Self:    ← Task 3b
+    def train(self, corpus, num_merges) -> None:          ← Task 3c
+    def _text_to_byte_ids(self, text) -> list[int]:      ← Task 3d
+    def _get_pair_counts(self, ids) -> dict:             ← Task 3e
+    def _merge_pair(self, ids, pair, new_id) -> list:    ← Task 3f
+    def _apply_merges(self, ids) -> list[int]:           ← Task 3g
+    def encode(self, text) -> list[int]:                 ← Task 3h
+    def decode(self, ids) -> str:                         ← Task 3i
+    def vocab_size(self) -> int:                          ← Task 3j (property)
 ```
 
-**Hint:** The implementation is intentionally short — three lines of tiktoken calls.
-
-```python
-import tiktoken
-enc = tiktoken.get_encoding("gpt2")
-enc.encode("Hello, world!")   # → list[int]
-enc.decode([15496, 11, 995])  # → str
-enc.n_vocab                   # → 50257
-```
+**Hints:**
+- Start with `_text_to_byte_ids`: `list(text.encode("utf-8"))` gives byte values 0–255.
+- `_merge_pair` must scan left-to-right and skip overlapping matches (see stub).
+- `_apply_merges` applies merges in **training order** (lowest rank first), same as OpenAI's `Encoder.bpe`.
+- Use `BPETokenizer.from_corpus(corpus, num_merges)` in tests — do not hard-code GPT-2's 50k merges.
 
 ## Example Input / Output
 
 ```python
-tok = BPETokenizer()
-print(tok.vocab_size)               # 50257
-ids = tok.encode("Hello, world!")   # [15496, 11, 995, 0]
-print(ids)                          # [15496, 11, 995, 0]
-print(tok.decode(ids))              # "Hello, world!"
-# Round-trip works
-assert tok.decode(tok.encode("The quick brown fox")) == "The quick brown fox"
+corpus = "aaab aaab ab b " * 20
+tok = BPETokenizer.from_corpus(corpus, num_merges=3)
+
+print(tok.vocab_size)               # 259  (256 bytes + 3 merges)
+ids = tok.encode("aaab")
+print(len(ids))                     # fewer than 4 after merges fire
+print(tok.decode(ids))              # "aaab"
+assert tok.decode(tok.encode("aaab")) == "aaab"
+```
+
+To compare your implementation against production GPT-2 tokenization (optional):
+
+```python
+import tiktoken
+ref = tiktoken.get_encoding("gpt2")
+ref.encode("Hello, world!")   # reference IDs — yours will differ unless you load GPT-2 merges
 ```
 
 ## Modern LLM Comparison
 
 | Model | Tokenizer | Vocab Size | Notes |
 |-------|-----------|------------|-------|
-| GPT-2 | BPE (tiktoken) | 50,257 | byte-level |
+| GPT-2 | BPE (byte-level) | 50,257 | regex pre-tokenizer + 50k merges |
 | GPT-4 | cl100k\_base | 100,277 | larger vocab → fewer tokens/doc |
 | LLaMA 3 | tiktoken | 128,256 | even larger vocab |
 | LLaMA 2 | SentencePiece | 32,000 | unigram LM, not BPE |
+
+Production tokenizers (tiktoken, SentencePiece) are implemented in Rust/C++ for
+speed — a pure-Python BPE is fine for learning but would be 100–1000× slower
+on billion-token corpora.
 
 Larger vocabularies encode text more efficiently (fewer tokens per sentence),
 which reduces sequence length and allows more text to fit in the context window.

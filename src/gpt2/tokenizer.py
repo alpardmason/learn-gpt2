@@ -5,7 +5,7 @@ Two tokenizers are provided:
 
   CharTokenizer  — character-level tokenizer; fully implemented; used in all tests
                    because it requires no external vocab files.
-  BPETokenizer   — byte-pair encoding tokenizer; stub wrapping tiktoken; YOUR TASK.
+  BPETokenizer   — byte-pair encoding tokenizer; from-scratch stub; YOUR TASK.
 
 [theory] Tokenization converts raw text into integer IDs that the model processes.
 GPT-2 uses Byte-Pair Encoding (BPE), which starts from individual bytes and
@@ -23,7 +23,10 @@ vocabulary is on the smaller end.
 Reference: references/gpt-2/src/encoder.py (OpenAI's original BPE implementation)
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
+from collections import Counter
 
 
 class Tokenizer(ABC):
@@ -86,7 +89,7 @@ class CharTokenizer(Tokenizer):
         self._itos: dict[int, str] = {i: ch for i, ch in enumerate(chars)}
 
     @classmethod
-    def from_text(cls, text: str) -> "CharTokenizer":
+    def from_text(cls, text: str) -> CharTokenizer:
         """
         Build a CharTokenizer whose vocabulary covers every character in `text`.
 
@@ -148,58 +151,158 @@ class CharTokenizer(Tokenizer):
 # Q2. The GPT-2 vocab has 50,257 tokens: 50,000 BPE merges + 256 byte tokens + 1
 #     special token. Which special token is that, and what is it used for?
 #
-# Q3. Why does tiktoken's encode() return different IDs for "Hello" vs " Hello"
-#     (with a leading space)? What does this tell you about GPT-2's tokenization?
+# Q3. After training on "aaab aaab ab b" with 3 merges, how many token IDs
+#     does encode("aaab") produce? Why is it fewer than 4?
 # ------------------------------------------------------------------------------
 
 
 class BPETokenizer(Tokenizer):
     """
-    Byte-Pair Encoding tokenizer wrapping tiktoken's GPT-2 encoding.
+    Byte-level BPE tokenizer implemented from scratch.
 
-    tiktoken is OpenAI's fast BPE implementation in Rust, used in production.
-    For educational purposes, you will implement a thin Python wrapper around
-    tiktoken so you understand the encode/decode interface.
+    You will implement the full training and encode/decode pipeline — no
+    tiktoken wrapper. Start from 256 byte tokens, learn merges from a corpus,
+    then greedily apply those merges at encode time.
 
-    [modern] Modern tokenizers like tiktoken and sentencepiece are implemented in
-    compiled languages (Rust/C++) for speed. A pure-Python BPE tokenizer would be
-    100–1000× slower, which matters when preprocessing billions of tokens.
+    [modern] Production tokenizers (tiktoken, SentencePiece) use the same BPE
+    logic but are compiled (Rust/C++) for speed. A pure-Python implementation
+    is fine for learning; it would be 100–1000× slower on billion-token corpora.
 
-    Task
-    ----
-    Implement __init__, encode, and decode using tiktoken:
-        import tiktoken
-        enc = tiktoken.get_encoding("gpt2")
-        enc.encode(text)   -> list[int]
-        enc.decode(ids)    -> str  (note: tiktoken decode takes list[int])
+    Reference: OpenAI's original implementation in references/gpt-2/src/encoder.py
     """
 
+    ENDOFTEXT = "<|endoftext|>"
+
     def __init__(self) -> None:
-        # Warmup: what is tiktoken.get_encoding("gpt2").n_vocab? Verify it equals
-        # the vocab_size you expect from the GPT-2 paper.
-        raise NotImplementedError(
-            "Task 3: Implement BPETokenizer.__init__.\n"
-            "  Hint: import tiktoken; self._enc = tiktoken.get_encoding('gpt2')"
-        )
+        """
+        Initialize an untrained tokenizer with the 256 raw byte tokens.
+
+        Set up:
+          self._id_to_bytes: dict[int, bytes]  — token ID → byte sequence
+          self._merges: list[tuple[int, int, int]] — ordered merge rules (left, right, new_id)
+        """
+        self._id_to_bytes: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
+        self._merges: list[tuple[int, int, int]] = []
+
+    @classmethod
+    def from_corpus(cls, corpus: str, num_merges: int) -> BPETokenizer:
+        """
+        Train a new BPETokenizer on `corpus` and return it.
+
+        Convenience wrapper: construct, call train(), return.
+        """
+        tokenizer = BPETokenizer()
+        tokenizer.train(corpus, num_merges)
+        return tokenizer
+
+    def train(self, corpus: str, num_merges: int) -> None:
+        """
+        Learn BPE merge rules from `corpus`.
+
+        [theory] Repeat num_merges times:
+          1. Convert corpus to byte IDs via _text_to_byte_ids.
+          2. Count adjacent pairs with _get_pair_counts.
+          3. Pick the most frequent pair; assign it the next token ID.
+          4. Record the merge and update self._id_to_bytes for the new token.
+        """
+        byte_ids = self._text_to_byte_ids(corpus)
+
+        for _ in range(num_merges):
+            # If the sequence is too short
+            if len(byte_ids) <= 1:
+                break
+
+            # Frequency statistics:
+            counts = self._get_pair_counts(byte_ids)
+            if not counts:
+                break
+
+            # Pick the most frequent pair.
+            # Original: pair = max(counts, key=lambda p: counts[p])
+            # [best practice] Ties must break deterministically. Count-only max picks whichever
+            # pair happened to be inserted first in the dict, which can vary across runs.
+            # max on (count, pair) picks highest frequency; on ties, lexicographically largest pair.
+            pair = max(counts, key=lambda p: (counts[p], p))
+
+            # Assign ID:
+            new_id = len(self._id_to_bytes)
+
+            self._id_to_bytes[new_id] = self._id_to_bytes[pair[0]] + self._id_to_bytes[pair[1]]
+
+            # Original: self._merges.append((pair[0], pair[1]))
+            # [best practice] Store new_id with the rule so encode() replays the exact ID from
+            # training instead of recomputing 256 + rank (fragile if training stops early).
+            self._merges.append((pair[0], pair[1], new_id))
+
+            # Merge new id:
+            byte_ids = self._merge_pair(byte_ids, pair, new_id)
+
+    def _text_to_byte_ids(self, text: str) -> list[int]:
+        """Convert UTF-8 text to initial byte token IDs (0–255)."""
+        # ![CAUTION] UTF-8 encoding and decoding!!!
+        return list(text.encode("utf-8"))
+
+    @staticmethod
+    def _get_pair_counts(ids: list[int]) -> dict[tuple[int, int], int]:
+        """Count adjacent token-ID pairs in a sequence."""
+        if len(ids) < 2:
+            return {}
+
+        # Original: manual dict loop with counts.get((i, j), 0) + 1
+        # [best practice] Counter tallies in C; same O(n) complexity but faster and clearer.
+        return dict(Counter(zip(ids, ids[1:])))
+
+    @staticmethod
+    def _merge_pair(ids: list[int], pair: tuple[int, int], new_id: int) -> list[int]:
+        """
+        Replace all non-overlapping occurrences of `pair` with `new_id`.
+
+        Scan left-to-right; when (ids[i], ids[i+1]) == pair, emit new_id
+        and advance i by 2. Otherwise emit ids[i] and advance by 1.
+        """
+        merged: list[int] = []
+        i = 0
+        n = len(ids)
+        # Original: compared ids[i] and ids[i + 1] separately and used i = i + 2 / i = i + 1
+        # [best practice] Cache n once; compare (ids[i], ids[i + 1]) as a tuple — same logic,
+        # fewer repeated bounds checks and more idiomatic pair comparison.
+        while i < n:
+            if i + 1 < n and (ids[i], ids[i + 1]) == pair:
+                merged.append(new_id)
+                i += 2
+            else:
+                merged.append(ids[i])
+                i += 1
+        return merged
+
+    def _apply_merges(self, ids: list[int]) -> list[int]:
+        """
+        Greedily apply learned merges to a byte-ID sequence.
+
+        Apply merges in training order (rank 0 first). After each merge rule,
+        re-scan for the next rule until all merges are attempted.
+        """
+        # Original: for rank, (a, b) in enumerate(self._merges):
+        #               ids = self._merge_pair(ids, (a, b), 256 + rank)
+        # [best practice] Use the new_id recorded during training; 256 + rank assumes every
+        # merge rank was filled sequentially with no gaps.
+        for a, b, new_id in self._merges:
+            ids = self._merge_pair(ids, (a, b), new_id)
+
+        return ids
 
     def encode(self, text: str) -> list[int]:
-        # Warmup: call enc.encode("Hello, world!") in a Python REPL.
-        # How many tokens does "Hello, world!" produce? What are their IDs?
-        raise NotImplementedError(
-            "Task 3: Implement BPETokenizer.encode.\n"
-            "  Hint: return self._enc.encode(text)"
-        )
+        """Convert a string to a list of integer token IDs."""
+        byte_ids = self._text_to_byte_ids(text)
+
+        return self._apply_merges(byte_ids)
 
     def decode(self, ids: list[int]) -> str:
-        # Note: tiktoken's decode method accepts list[int] directly.
-        raise NotImplementedError(
-            "Task 3: Implement BPETokenizer.decode.\n"
-            "  Hint: return self._enc.decode(ids)"
-        )
+        """Convert a list of integer token IDs back to a string."""
+        # ![CAUTION] raw bytes manipulation!
+        return b"".join(self._id_to_bytes[i] for i in ids).decode("utf-8")
 
     @property
     def vocab_size(self) -> int:
-        raise NotImplementedError(
-            "Task 3: Implement BPETokenizer.vocab_size.\n"
-            "  Hint: return self._enc.n_vocab"
-        )
+        """Number of distinct token types (256 bytes + learned merges)."""
+        return len(self._id_to_bytes)
