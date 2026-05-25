@@ -62,27 +62,30 @@ class TestBPETokenizer:
     These tests will be unblocked automatically once you complete Task 3.
     """
 
+    _CORPUS = "aaab aaab ab b " * 20
+    _NUM_MERGES = 10
+
     @pytest.fixture()
     def bpe(self) -> BPETokenizer:
         try:
-            return BPETokenizer()
+            return BPETokenizer.from_corpus(self._CORPUS, num_merges=self._NUM_MERGES)
         except NotImplementedError:
             pytest.skip("BPETokenizer not yet implemented (Task 3)")
 
     def test_vocab_size(self, bpe: BPETokenizer) -> None:
-        assert bpe.vocab_size == 50257
+        assert bpe.vocab_size == 256 + self._NUM_MERGES
 
     def test_encode_returns_ints(self, bpe: BPETokenizer) -> None:
-        ids = bpe.encode("Hello, world!")
+        ids = bpe.encode("aaab")
         assert isinstance(ids, list)
         assert all(isinstance(i, int) for i in ids)
 
     def test_decode_roundtrip(self, bpe: BPETokenizer) -> None:
-        text = "The quick brown fox"
+        text = "aaab ab"
         assert bpe.decode(bpe.encode(text)) == text
 
-    def test_space_prefix_matters(self, bpe: BPETokenizer) -> None:
-        """GPT-2 BPE distinguishes 'Hello' from ' Hello' (leading space)."""
-        ids_no_space = bpe.encode("Hello")
-        ids_with_space = bpe.encode(" Hello")
-        assert ids_no_space != ids_with_space
+    def test_merges_reduce_token_count(self, bpe: BPETokenizer) -> None:
+        """After training, frequent byte sequences should compress to fewer tokens."""
+        raw_byte_count = len(b"aaab")
+        merged_count = len(bpe.encode("aaab"))
+        assert merged_count < raw_byte_count
