@@ -239,11 +239,14 @@ class CausalSelfAttention(nn.Module):
     """
     Multi-head causal self-attention.
 
-    Uses PyTorch's F.scaled_dot_product_attention with is_causal=True,
-    which efficiently applies the causal mask without materialising it.
+    forward() implements scaled dot-product attention manually so the math is
+    visible (QK^T / sqrt(d_k) → causal mask → softmax → AV). For production
+    training, replace the manual kernel with F.scaled_dot_product_attention
+    (see inline comments in forward).
 
-    [best practice] PyTorch's SDPA auto-selects FlashAttention, memory-efficient
-    attention, or math attention depending on hardware and input shape.
+    [best practice] PyTorch SDPA with is_causal=True auto-selects
+    FlashAttention, memory-efficient attention, or math attention depending on
+    hardware and input shape — without materialising the full (T×T) score matrix.
     """
 
     def __init__(self, config: GPT2Config) -> None:
@@ -288,16 +291,50 @@ class CausalSelfAttention(nn.Module):
         2. Split along last dim: q, k, v each (B, T, C)
         3. Reshape to separate heads: (B, n_head, T, head_dim)
            Hint: x.view(B, T, n_head, head_dim).transpose(1, 2)
-        4. Apply F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        4. Scaled dot-product attention (manual below; SDPA one-liner in comments)
         5. Merge heads back: (B, T, C)
            Hint: .transpose(1, 2).contiguous().view(B, T, C)
         6. Apply output projection self.c_proj
         """
-        raise NotImplementedError(
-            "Task 6: Implement CausalSelfAttention.forward.\n"
-            "  Key call: F.scaled_dot_product_attention(q, k, v, is_causal=True)\n"
-            "  Reference: references/gpt-2/src/model.py  multihead_attn(q, k, v)"
-        )
+        batch_size = x.size(0)
+        qkv: torch.Tensor = self.c_attn(x)  # (B, T, 3C)
+        q, k, v = qkv.split(self.n_embd, dim=-1)  # 3 * (B, T, C)
+
+        # (B, T, C) -> (B, T, n_head, head_dim) -> (B, n_head, T, head_dim)
+        q = q.view(batch_size, -1, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, -1, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, -1, self.n_head, self.head_dim).transpose(1, 2)
+
+        # --- Manual attention (pedagogical) -----------------------------------
+        # [best practice] For production, replace this entire block with:
+        #   import torch.nn.functional as F
+        #   output = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        # SDPA fuses scale → causal mask → softmax → weighted sum and can
+        # dispatch to FlashAttention, avoiding O(B·H·T²) memory for score tensors.
+        # At GPT-2 Small (T=1024, H=12), one (B,H,T,T) float32 tensor ≈ 48 MB;
+        # manual attention allocates several per layer per forward pass.
+
+        # Attention scores: QK^T / sqrt(head_dim)  →  shape (B, H, T, T)
+        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+
+        # Causal mask: token i may attend only to j ≤ i.
+        # [best practice] SDPA applies this implicitly via is_causal=True — no
+        # tril(ones_like) allocation each forward pass.
+        mask = torch.tril(torch.ones_like(scores)).bool()
+        scores = torch.where(mask, scores, float("-inf"))
+
+        # Row-wise softmax → attention weights (each row sums to 1)
+        p_attn = torch.softmax(scores, dim=-1)
+
+        # Weighted sum of values:  output = P @ V
+        output = torch.matmul(p_attn, v)
+        # --- End manual attention ---------------------------------------------
+
+        # Merge heads
+        output = output.transpose(1, 2).contiguous().view(batch_size, -1, self.n_embd)
+
+        # Apply output projection
+        return self.c_proj(output)
 
 
 # ===========================================================================
