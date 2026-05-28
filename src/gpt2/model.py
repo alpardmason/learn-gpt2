@@ -167,9 +167,23 @@ class LayerNorm(nn.Module):
         torch.Tensor
             Same shape as input.
         """
+        # [best practice] Population variance via x.var(unbiased=False).
+        #   Pro: Matches the LayerNorm paper and nn.LayerNorm; one readable line.
+        #   Con: x.var() recomputes mean internally — two reduction passes over x.
+        #   Alternative: var = (x - mean).pow(2).mean(dim=-1, keepdim=True)
+        #     Pro: reuses the mean below; one fewer full reduction.
+        #     Con: slightly less obvious that this is population variance.
         mean = x.mean(dim=-1, keepdim=True)
         var = x.var(dim=-1, keepdim=True, unbiased=False)
+
+        # [best practice] sqrt (current) vs rsqrt — mathematically equivalent:
+        #   (x - mean) / (var + eps).sqrt()   divide by σ — readable, matches the paper
+        #   (x - mean) * (var + eps).rsqrt()  multiply by 1/σ — faster on GPU (mul < div)
         x_hat = (x - mean) / (var + self.eps).sqrt()
+
+        # [best practice] Production alternative — F.layer_norm(x, (n_embd,), weight, bias, eps)
+        #   Pro: fused CUDA kernel; fastest at training/inference scale.
+        #   Con: hides the normalization math; keep the explicit form for learning.
         return self.weight * x_hat + self.bias
 
 
