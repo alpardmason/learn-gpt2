@@ -167,14 +167,10 @@ class LayerNorm(nn.Module):
         torch.Tensor
             Same shape as input.
         """
-        raise NotImplementedError(
-            "Task 5: Implement LayerNorm.forward.\n"
-            "  Steps:\n"
-            "    1. mean = x.mean(dim=-1, keepdim=True)\n"
-            "    2. var  = x.var(dim=-1, keepdim=True, unbiased=False)\n"
-            "    3. x_hat = (x - mean) / (var + self.eps).sqrt()\n"
-            "    4. return self.weight * x_hat + self.bias"
-        )
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        x_hat = (x - mean) / (var + self.eps).sqrt()
+        return self.weight * x_hat + self.bias
 
 
 # ===========================================================================
