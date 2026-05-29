@@ -49,8 +49,8 @@ src/gpt2/
 The model uses:
 - **Pre-norm residual blocks** (LayerNorm before each sub-layer)
 - **Learned absolute position embeddings** (wpe, shape `n_ctx × n_embd`)
-- **Weight-tied logits** (`wte.weight` reused as output projection)
-- **Causal mask via `F.scaled_dot_product_attention(is_causal=True)`**
+- **Weight-tied logits** (`wte.weight` reused as output projection via `F.linear`)
+- **Manual causal attention** in `CausalSelfAttention` (pedagogical); production swap is `F.scaled_dot_product_attention(is_causal=True)` — see guide 06 comments
 - **No dropout** during pretraining (per GPT-2 paper §2)
 
 ---
@@ -99,7 +99,7 @@ q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B,H,T,D)
 
 **Symptom:** `test_wte_and_lm_head_share_weights` fails.
 **Cause:** Added `self.lm_head = nn.Linear(...)` in `__init__`.
-**Fix:** Do NOT create an `nn.Linear`. Use `h @ self.transformer.wte.weight.T` in `forward`.
+**Fix:** Do NOT create an `nn.Linear`. Use `F.linear(h, self.transformer.wte.weight)` (or `h @ wte.weight.T`) in `forward`.
 
 ---
 
@@ -118,8 +118,8 @@ targets_shifted = token_ids[:, 1:].contiguous()
 ### 5. Causal mask not applied (future tokens visible)
 
 **Symptom:** `test_future_tokens_do_not_affect_past` fails.
-**Cause:** Using `F.scaled_dot_product_attention(q, k, v)` without `is_causal=True`.
-**Fix:** Add `is_causal=True` to the SDPA call.
+**Cause:** Manual attention without a causal mask, or SDPA without `is_causal=True`.
+**Fix (manual):** Apply a lower-triangular mask before softmax. **Fix (SDPA):** Add `is_causal=True` to the SDPA call.
 
 ---
 
@@ -139,18 +139,41 @@ targets_shifted = token_ids[:, 1:].contiguous()
 
 ---
 
+### 8. Parameter-count test uses a loose magnitude bound
+
+**Symptom:** `test_parameter_count_excludes_duplicate_lm_head` fails with
+`assert 28032 < 14096`, even though weight tying is implemented correctly.
+**Cause:** The assertion bounded `total` by `~2 * vocab_size * n_embd + 10_000`,
+which only budgets for embedding-scale terms and ignores the transformer blocks
+(they dominate, scaling as `n_layer * n_embd²`). It also can't distinguish a tied
+head from an untied one (an untied `lm_head` is only `+vocab_size * n_embd`).
+**Fix:** Derive the exact expected count from the architecture and assert
+equality (`total == expected_tied`) plus `untied - tied == vocab_size * n_embd`.
+See `_expected_param_count` in `tests/component/test_model_forward.py`.
+**Prevention:** Assert exact, architecture-derived counts — never loose `<` bounds —
+for structural invariants like parameter counts.
+
+---
+
+### 9. Static type error: `"Module" is not iterable`
+
+**Symptom:** Pyright/Pylance flags `for layer in self.transformer["h"]`.
+**Cause:** `nn.ModuleDict.__getitem__` is typed to return base `nn.Module` (no
+`__iter__`), even though `"h"` holds an iterable `nn.ModuleList` at runtime.
+**Fix:** `cast(nn.ModuleList, self.transformer["h"])` (zero runtime cost).
+**Prevention:** When indexing `ModuleDict`/`ModuleList`, cast to the concrete
+type if you rely on type-specific behaviour (iteration, indexing).
+
+---
+
 ## Key Technical Decisions
 
-### Why `F.scaled_dot_product_attention` instead of manual attention?
+### Why manual attention in code, SDPA in production?
 
-**Decision:** Use PyTorch ≥ 2.0's built-in SDPA.
-**Context:** Manual attention requires materialising the `(B, H, T, T)` attention
-weight matrix, which is O(T²) memory. SDPA auto-dispatches to FlashAttention
-when hardware supports it, falling back to math attention otherwise.
-**Alternative considered:** Manually implement `softmax(QK^T/√d_k) · V` as in
-the OpenAI reference code. This is didactically clearer but O(T²) in memory.
-**Rationale:** Clarity is preserved (the equation is in the guide); correctness
-is guaranteed by PyTorch; students see a production-quality pattern.
+**Decision:** Implement `softmax(QK^T/√d_k) · V` manually in `CausalSelfAttention.forward`; document SDPA as the production one-liner.
+**Context:** Manual attention materialises the `(B, H, T, T)` score matrix — O(T²) memory per layer. SDPA fuses scale → mask → softmax → matmul and can dispatch to FlashAttention.
+**Alternative considered:** Ship SDPA from the start (as in nanochat). Faster and less memory, but hides the equation students are learning in guide 06.
+**Rationale:** Clarity over performance for the learning path; comments show exactly how to swap in `F.scaled_dot_product_attention(q, k, v, is_causal=True)` once the math is understood.
 
 ---
 

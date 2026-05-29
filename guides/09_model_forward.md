@@ -22,12 +22,40 @@ $$h = \text{Block}_N(\ldots \text{Block}_1(h))$$
 
 **5. Final norm + logits (weight-tied):**
 $$h = \text{ln\_f}(h)$$
-$$\text{logits} = h \cdot \text{wte.weight}^\top \in \mathbb{R}^{B \times T \times V}$$
+$$\text{logits} = h \, W_{\text{te}}^\top \in \mathbb{R}^{B \times T \times V}$$
+
+where $W_{\text{te}} \in \mathbb{R}^{V \times C}$ is the **same** weight matrix as the token embedding table.
 
 **Weight tying** (Press & Wolf 2017): the output projection matrix is the
 *same tensor* as the token embedding matrix `wte.weight`. This halves the
 embedding parameter count (~38M for GPT-2 Small) and often improves
 perplexity by encouraging consistent token representations throughout the model.
+
+**Module layout:** sub-modules live under `self.transformer`, an `nn.ModuleDict`, so
+`state_dict` keys match HuggingFace / OpenAI naming (`transformer.wte.weight`, etc.).
+Access with bracket notation: `self.transformer["wte"]`, not attribute access.
+
+### Matrix-form backpropagation
+
+Let upstream loss gradient be $\frac{\partial \mathcal{L}}{\partial \text{logits}} \in \mathbb{R}^{B \times T \times V}$.
+
+**Tied logit projection.** With $\text{logits}_{b,t,:} = h_{b,t,:} \, W_{\text{te}}^\top$ (matrix multiply $H W^\top$):
+
+$$\frac{\partial \mathcal{L}}{\partial H} = \frac{\partial \mathcal{L}}{\partial \text{logits}} \, W_{\text{te}} \in \mathbb{R}^{B \times T \times C}$$
+
+$$\frac{\partial \mathcal{L}}{\partial W_{\text{te}}} = \sum_{b,t} \left(\frac{\partial \mathcal{L}}{\partial \text{logits}}\right)_{b,t,:}^\top h_{b,t,:} \in \mathbb{R}^{V \times C}$$
+
+Because $W_{\text{te}}$ is shared, gradients from the **embedding lookup** (stage 1) and the **output projection** (stage 5) **accumulate** on the same parameter tensor. That is why you must not register a separate `lm_head`.
+
+**Input sum.** For $h = e_{\text{tok}} + e_{\text{pos}}$:
+
+$$\frac{\partial \mathcal{L}}{\partial e_{\text{tok}}} = \frac{\partial \mathcal{L}}{\partial h}, \qquad \frac{\partial \mathcal{L}}{\partial e_{\text{pos}}} = \sum_b \frac{\partial \mathcal{L}}{\partial h_{b,:,:}}$$
+
+Position embeddings aggregate gradients across the batch dimension.
+
+**Block stack.** Each `Block` is shape-preserving $(B,T,C) \to (B,T,C)$; backprop chains through $N$ blocks via the standard residual-path Jacobians derived in guides 05–08.
+
+**Jacobian structure:** embedding lookup is sparse (one row per token); block stack is block-diagonal across sequence positions except inside attention (dense $T \times T$ coupling per head).
 
 ## Warmup
 
@@ -36,43 +64,48 @@ Input `idx` of shape **(2, 8)**:
 
 | Stage | Expression | Shape |
 |-------|-----------|-------|
-| Token embed | `wte(idx)` | (2, 8, 32) |
-| Pos indices | `arange(0, 8)` | (8,) |
-| Pos embed | `wpe(pos)` | (8, 32) → broadcast |
-| Sum | `h = tok_emb + pos_emb` | (2, 8, 32) |
-| Block 1 | `h = block1(h)` | (2, 8, 32) |
-| Block 2 | `h = block2(h)` | (2, 8, 32) |
-| Final norm | `h = ln_f(h)` | (2, 8, 32) |
-| Logits | `h @ wte.weight.T` | (2, 8, 64) |
+| Token embed | `transformer["wte"](idx)` | (2, 8, 32) |
+| Pos indices | `arange(T, device=idx.device)` | (8,) |
+| Pos embed | `transformer["wpe"](pos)` | (8, 32) → broadcast |
+| Sum | `x = tok_emb + pos_emb` | (2, 8, 32) |
+| Block 1 | `x = block1(x)` | (2, 8, 32) |
+| Block 2 | `x = block2(x)` | (2, 8, 32) |
+| Final norm | `x = ln_f(x)` | (2, 8, 32) |
+| Logits | `F.linear(x, wte.weight)` | (2, 8, 64) |
 
 ## Your Task
 
-Open `src/gpt2/model.py` and find `class GPT2Model`. Implement `forward`:
+Open `src/gpt2/model.py` and find `class GPT2Model`. Ensure the module imports `cast` from `typing` and `F` from `torch.nn.functional` (they are already present if you followed earlier tasks). Implement `forward`:
 
 ```python
 def forward(self, idx: torch.Tensor) -> torch.Tensor:
-    B, T = idx.size()
+    T = idx.size(1)
     assert T <= self.config.n_ctx, f"Sequence too long: {T} > {self.config.n_ctx}"
 
-    # 1. Position indices (0, 1, ..., T-1) on the same device as idx
-    pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+    # 1. Position indices on the same device as idx (avoid CPU→device copy)
+    pos = torch.arange(T, dtype=torch.long, device=idx.device)
 
-    # 2. Embeddings
-    tok_emb = self.transformer.wte(idx)   # (B, T, C)
-    pos_emb = self.transformer.wpe(pos)   # (T, C)  — broadcasts over B
-    h = tok_emb + pos_emb                 # (B, T, C)
+    # 2. Embeddings (ModuleDict bracket access)
+    tok_emb = self.transformer["wte"](idx)   # (B, T, C)
+    pos_emb = self.transformer["wpe"](pos)   # (T, C)  — broadcasts over B
+    x = tok_emb + pos_emb                    # (B, T, C)
 
-    # 3. Transformer blocks
-    for block in self.transformer.h:
-        h = block(h)
+    # 3. Transformer blocks — cast silences "Module is not iterable" from Pyright
+    for layer in cast(nn.ModuleList, self.transformer["h"]):
+        x = layer(x)
 
     # 4. Final layer norm
-    h = self.transformer.ln_f(h)          # (B, T, C)
+    x = self.transformer["ln_f"](x)          # (B, T, C)
 
-    # 5. Weight-tied logit projection
-    logits = h @ self.transformer.wte.weight.T   # (B, T, vocab_size)
+    # 5. Weight-tied logit projection (F.linear(x, W) ≡ x @ W.T)
+    wte = cast(nn.Embedding, self.transformer["wte"])
+    logits = F.linear(x, wte.weight)         # (B, T, vocab_size)
     return logits
 ```
+
+**Do not** add `self.lm_head = nn.Linear(...)`. Weight tying reuses `wte.weight`.
+
+**Prerequisites:** Tasks 04–08 must be complete before this test will pass.
 
 ## Example Input / Output
 
@@ -90,8 +123,17 @@ print(logits.shape)    # torch.Size([2, 8, 64])
 param_names = [n for n, _ in model.named_parameters()]
 print(any("lm_head" in n for n in param_names))  # False
 
-print(model.num_parameters())  # ~20K for tiny config
+print(model.num_parameters())  # 28032 for tiny config (exact, not ~20K)
 ```
+
+## Common Pitfalls
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `"Module" is not iterable` (Pyright) | `ModuleDict["h"]` typed as base `nn.Module` | `cast(nn.ModuleList, self.transformer["h"])` |
+| Param-count test fails despite correct tying | Loose `<` bound ignores block params | Test uses exact architecture-derived count — see `_expected_param_count` in `tests/component/test_model_forward.py` |
+| Duplicate ~38M params at GPT-2 Small | Separate `nn.Linear` lm\_head registered | Use `F.linear(x, wte.weight)` only |
+| Slow forward on GPU | `arange(...).to(device)` each step | `arange(T, device=idx.device)` |
 
 ## Modern LLM Comparison
 
@@ -108,5 +150,7 @@ print(model.num_parameters())  # ~20K for tiny config
 uv run pytest tests/component/test_model_forward.py -v
 ```
 
-The weight-tying test is a regression guard: if you accidentally add an
-`nn.Linear` lm\_head, the test fails and warns you of the duplicate parameters.
+The weight-tying tests are regression guards:
+
+- `test_wte_and_lm_head_share_weights` — no separate `lm_head` parameter exists.
+- `test_parameter_count_excludes_duplicate_lm_head` — total equals the exact tied count; an untied head would add `vocab_size * n_embd` params.

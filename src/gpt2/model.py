@@ -29,9 +29,11 @@ References:
 """
 
 import math
+from typing import cast
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from gpt2.config import GPT2Config
 
@@ -215,9 +217,10 @@ class LayerNorm(nn.Module):
 #     attention matrix in HBM, enabling longer contexts.
 #
 # Reference: references/gpt-2/src/model.py  attn(x, scope, n_state, ...)
-# [nanochat] We use F.scaled_dot_product_attention (PyTorch ≥ 2.0) which
-#            dispatches to FlashAttention when available. The original OpenAI
-#            code implements the attention kernel manually in TensorFlow.
+# [best practice] Production code uses F.scaled_dot_product_attention (PyTorch ≥ 2.0),
+# which dispatches to FlashAttention when available. This educational codebase implements
+# the kernel manually first (see forward()) so students see QK^T/√d, masking, and softmax;
+# swap in SDPA once the math is internalised.
 
 # Warmup -----------------------------------------------------------------------
 # For a sequence of length T=4, draw the causal attention mask.
@@ -606,11 +609,30 @@ class GPT2Model(nn.Module):
         6. h = transformer.ln_f(h)
         7. logits = h @ transformer.wte.weight.T   (weight-tied projection)
         """
-        raise NotImplementedError(
-            "Task 9: Implement GPT2Model.forward.\n"
-            "  Remember: weight-tied logits = h @ self.transformer.wte.weight.T\n"
-            "  Reference: references/gpt-2/src/model.py  model(hparams, X, ...)"
-        )
+        T = idx.size(1)
+        assert T <= self.config.n_ctx, f"Sequence too long: {T} > {self.config.n_ctx}"
+
+        # Build positions directly on the target device — avoids a CPU->device
+        # copy on every forward step that `torch.arange(...).to(device)` incurs.
+        pos = torch.arange(T, dtype=torch.long, device=idx.device)
+
+        tok_emb = self.transformer["wte"](idx)
+        pos_emb = self.transformer["wpe"](pos)
+
+        x = tok_emb + pos_emb
+
+        # nn.ModuleDict.__getitem__ is typed to return nn.Module (not iterable),
+        # so we cast "h" back to its real ModuleList type for the type checker.
+        for layer in cast(nn.ModuleList, self.transformer["h"]):
+            x = layer(x)
+
+        x = self.transformer["ln_f"](x)
+
+        # Weight-tied projection. F.linear(x, W) computes x @ W.T without
+        # materialising a transposed view and is the idiomatic tied-head form.
+        wte = cast(nn.Embedding, self.transformer["wte"])
+        logits = F.linear(x, wte.weight)
+        return logits
 
     def num_parameters(self, exclude_embeddings: bool = False) -> int:
         """
@@ -621,8 +643,15 @@ class GPT2Model(nn.Module):
         exclude_embeddings : bool
             If True, exclude wte and wpe from the count. This matches the
             convention used in the GPT-2 paper when reporting model size.
+
+        Notes
+        -----
+        Only parameters with ``requires_grad`` are counted ("trainable"). With
+        weight tying, ``wte.weight`` appears once, so it is never double counted.
         """
-        params = list(self.parameters())
-        if exclude_embeddings:
-            params = [p for n, p in self.named_parameters() if "wte" not in n and "wpe" not in n]
-        return sum(p.numel() for p in params)
+        return sum(
+            p.numel()
+            for n, p in self.named_parameters()
+            if p.requires_grad
+            and not (exclude_embeddings and ("wte" in n or "wpe" in n))
+        )
