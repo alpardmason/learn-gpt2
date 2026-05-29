@@ -393,11 +393,7 @@ class MLP(nn.Module):
         torch.Tensor
             Shape (B, T, C). (Dimension is preserved end-to-end.)
         """
-        raise NotImplementedError(
-            "Task 7: Implement MLP.forward.\n"
-            "  Steps: x = self.c_fc(x); x = self.gelu(x); x = self.c_proj(x)\n"
-            "  Reference: references/gpt-2/src/model.py  mlp(x, scope, n_state, ...)"
-        )
+        return self.c_proj(self.gelu(self.c_fc(x)))
 
 
 # ===========================================================================
