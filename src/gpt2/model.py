@@ -425,12 +425,12 @@ class MLP(nn.Module):
 # Warmup -----------------------------------------------------------------------
 # Trace the residual stream for a single block on input x (shape B,T,C):
 #
-#   a = LayerNorm₁(x)          shape: ?
-#   b = Attention(a)            shape: ?
-#   x = x + b                  shape: ?  ← first residual add
-#   c = LayerNorm₂(x)          shape: ?
-#   d = MLP(c)                  shape: ?
-#   x = x + d                  shape: ?  ← second residual add
+#   a = LayerNorm₁(x)          shape: (B, T, C)
+#   b = Attention(a)            shape: (B, T, C)
+#   x = x + b                  shape: (B, T, C)  ← first residual add
+#   c = LayerNorm₂(x)          shape: (B, T, C)
+#   d = MLP(c)                  shape: (B, T, C)
+#   x = x + d                  shape: (B, T, C)  ← second residual add
 #
 # All intermediate shapes should be (B, T, C). The block is shape-preserving.
 # ------------------------------------------------------------------------------
@@ -462,12 +462,8 @@ class Block(nn.Module):
         torch.Tensor
             Shape (B, T, C).
         """
-        raise NotImplementedError(
-            "Task 8: Implement Block.forward.\n"
-            "  x = x + self.attn(self.ln_1(x))\n"
-            "  x = x + self.mlp(self.ln_2(x))\n"
-            "  Reference: references/gpt-2/src/model.py  block(x, scope, ...)"
-        )
+        x = x + self.attn(self.ln_1(x))
+        return x + self.mlp(self.ln_2(x))
 
 
 # ===========================================================================
