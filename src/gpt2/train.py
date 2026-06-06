@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 import torch
+import torch.nn.functional as F
 
 from gpt2.model import GPT2Model
 
@@ -84,12 +85,12 @@ def cross_entropy_loss(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.T
     2. Flatten: logits → (B*(T-1), vocab_size), targets → (B*(T-1),)
     3. Return F.cross_entropy(logits_flat, targets_flat)
     """
-    raise NotImplementedError(
-        "Task 10: Implement cross_entropy_loss.\n"
-        "  logits_shifted  = logits[:, :-1, :].contiguous()\n"
-        "  targets_shifted = token_ids[:, 1:].contiguous()\n"
-        "  return F.cross_entropy(logits_shifted.view(-1, logits.size(-1)),\n"
-        "                         targets_shifted.view(-1))"
+    logits_shifted = logits[:, :-1, :].contiguous()
+    targets_shifted = token_ids[:, 1:].contiguous()
+
+    return F.cross_entropy(
+        logits_shifted.view(-1, logits.size(-1)),
+        targets_shifted.view(-1),
     )
 
 
@@ -220,7 +221,7 @@ class TrainConfig:
     max_steps: int = 10_000
     batch_size: int = 8
     learning_rate: float = 3e-4
-    min_lr_ratio: float = 0.1           # min_lr = learning_rate * min_lr_ratio
+    min_lr_ratio: float = 0.1  # min_lr = learning_rate * min_lr_ratio
     warmup_steps: int = 200
     weight_decay: float = 0.01
     grad_clip: float = 1.0

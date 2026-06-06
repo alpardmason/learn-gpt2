@@ -9,6 +9,7 @@ Component hierarchy (bottom-up):
   Block                   — one transformer block (attn + mlp + residuals)
   GPT2Model               — full model (embeddings + N blocks + head)
 
+
 [theory] GPT-2 is a decoder-only transformer (Vaswani et al., 2017) with two key
 differences from the original "Attention is All You Need":
   1. Pre-LayerNorm: normalisation is applied BEFORE each sub-layer (not after).
