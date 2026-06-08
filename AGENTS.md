@@ -103,15 +103,21 @@ q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)  # (B,H,T,D)
 
 ---
 
-### 4. Cross-entropy loss not shifting
+### 4. Cross-entropy loss not shifting (equal-length case)
 
-**Symptom:** Loss is always near 0 at init (suspiciously perfect).
-**Cause:** Passing `logits` and `token_ids` without the `[:, :-1]` / `[:, 1:]` shift.
-**Fix:**
+**Symptom:** Loss is always near 0 at init (suspiciously perfect), or
+`ValueError: Expected input batch_size (N) to match target batch_size (M)`.
+**Cause:** When `logits` and `token_ids` are both shape `(B, T)`, you must shift
+both by one position. Applying only one slice (or none) misaligns predictions
+with targets.
+**Fix (equal lengths — model forward / eval):**
 ```python
-logits_shifted  = logits[:, :-1, :].contiguous()
-targets_shifted = token_ids[:, 1:].contiguous()
+logits_flat  = logits[:, :-1, :].contiguous().view(-1, vocab_size)
+targets_flat = token_ids[:, 1:].contiguous().view(-1)
 ```
+**Fix (training batch — `token_ids` is `(B, T+1)`):** Feed `token_ids[:, :-1]`
+to the model so logits are `(B, T, V)`; compare directly to `token_ids[:, 1:]`
+with **no** extra logit shift. See pitfall 10.
 
 ---
 
@@ -163,6 +169,39 @@ for structural invariants like parameter counts.
 **Fix:** `cast(nn.ModuleList, self.transformer["h"])` (zero runtime cost).
 **Prevention:** When indexing `ModuleDict`/`ModuleList`, cast to the concrete
 type if you rely on type-specific behaviour (iteration, indexing).
+
+---
+
+### 10. Training batch `(B, T+1)` passed directly to the model
+
+**Symptom:** `AssertionError: Sequence too long: 17 > 16` during `Trainer.train`.
+**Cause:** Data iterators yield `(B, n_ctx + 1)` tokens so the loss has a
+next-token target for every input position. Passing the full batch to
+`model(token_ids)` exceeds `n_ctx`.
+**Fix:** Slice inputs before the forward pass; keep the full batch for loss:
+```python
+inputs = token_ids[:, :-1]          # (B, n_ctx)
+logits = self.model(inputs)           # (B, n_ctx, vocab_size)
+loss = cross_entropy_loss(logits, token_ids)  # token_ids still (B, n_ctx + 1)
+```
+**Prevention:** Treat `(B, T+1)` batches as "inputs + one extra target token",
+not as a sequence length the model can consume.
+
+---
+
+### 11. LR schedule assert when `max_steps ≤ warmup_steps`
+
+**Symptom:** `AssertionError: max_steps (10) must exceed warmup_steps (200)` on
+the first training step in short smoke tests.
+**Cause:** `TrainConfig` defaults to `warmup_steps=200`, but system tests use
+small `max_steps` (10–50) without overriding warmup.
+**Fix:** In `_update_lr`, clamp effective warmup before calling
+`cosine_lr_schedule`:
+```python
+warmup_steps = min(config.warmup_steps, max(1, config.max_steps - 1))
+```
+**Prevention:** For any run where `max_steps` is small, either override
+`warmup_steps` in `TrainConfig` or rely on the clamp in `_update_lr`.
 
 ---
 

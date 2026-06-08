@@ -17,6 +17,7 @@ into distinct units makes each component individually testable and reusable.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
@@ -85,13 +86,16 @@ def cross_entropy_loss(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.T
     2. Flatten: logits → (B*(T-1), vocab_size), targets → (B*(T-1),)
     3. Return F.cross_entropy(logits_flat, targets_flat)
     """
-    logits_shifted = logits[:, :-1, :].contiguous()
-    targets_shifted = token_ids[:, 1:].contiguous()
+    # [NOTE] Training batches include one extra token (T+1) so targets align with logits
+    # from model(inputs); eval passes equal-length logits and token_ids and we shift.
+    if token_ids.size(1) == logits.size(1) + 1:
+        logits_flat = logits.contiguous().view(-1, logits.size(-1))
+        targets_flat = token_ids[:, 1:].contiguous().view(-1)
+    else:
+        logits_flat = logits[:, :-1, :].contiguous().view(-1, logits.size(-1))
+        targets_flat = token_ids[:, 1:].contiguous().view(-1)
 
-    return F.cross_entropy(
-        logits_shifted.view(-1, logits.size(-1)),
-        targets_shifted.view(-1),
-    )
+    return F.cross_entropy(logits_flat, targets_flat)
 
 
 # ===========================================================================
@@ -158,15 +162,23 @@ def cosine_lr_schedule(
     float
         Learning rate for this step.
     """
-    raise NotImplementedError(
-        "Task 11: Implement cosine_lr_schedule.\n"
-        "  Phase 1 (step < warmup_steps):  return max_lr * step / warmup_steps\n"
-        "  Phase 2 (step <= max_steps):    cosine decay toward min_lr\n"
-        "    progress = (step - warmup_steps) / (max_steps - warmup_steps)\n"
-        "    coeff    = 0.5 * (1.0 + math.cos(math.pi * progress))\n"
-        "    return min_lr + coeff * (max_lr - min_lr)\n"
-        "  Phase 3 (step > max_steps):     return min_lr"
+    # Input checking:
+    # [NOTE] <dev>: How to write good checkings?
+    assert step >= 0, f"step must be non-negative, got {step}"
+    assert max_steps > warmup_steps, (
+        f"max_steps ({max_steps}) must exceed warmup_steps ({warmup_steps})"
     )
+    # Phase 1: 0 -> warmup_steps
+    if step < warmup_steps:
+        return max_lr * step / warmup_steps
+
+    # Phase 2: warmup_steps -> max_steps
+    if step < max_steps:
+        progress = (step - warmup_steps) / (max_steps - warmup_steps)
+        return min_lr + 0.5 * (max_lr - min_lr) * (1 + math.cos(math.pi * progress))
+
+    # Phase 3: max_steps -> end
+    return min_lr
 
 
 # ===========================================================================
@@ -277,11 +289,17 @@ class Trainer:
 
     def _update_lr(self) -> float:
         """Compute and apply the current LR to all parameter groups."""
+        # Short test runs may use max_steps < warmup_steps; clamp so the schedule
+        # still satisfies max_steps > warmup_steps.
+        warmup_steps = min(
+            self.config.warmup_steps,
+            max(1, self.config.max_steps - 1),
+        )
         lr = cosine_lr_schedule(
             step=self.step,
             max_lr=self.config.learning_rate,
             min_lr=self.config.learning_rate * self.config.min_lr_ratio,
-            warmup_steps=self.config.warmup_steps,
+            warmup_steps=warmup_steps,
             max_steps=self.config.max_steps,
         )
         for group in self.optimizer.param_groups:
@@ -315,14 +333,16 @@ class Trainer:
         8. Increment self.step.
         9. Return loss.item().
         """
-        raise NotImplementedError(
-            "Task 12: Implement Trainer.train_step.\n"
-            "  Follow the 9-step order above exactly.\n"
-            "  Use: self.optimizer.zero_grad(set_to_none=True)\n"
-            "       torch.nn.utils.clip_grad_norm_(\n"
-            "           self.model.parameters(), self.config.grad_clip)\n"
-            "       self._update_lr()"
-        )
+        self.optimizer.zero_grad(set_to_none=True)
+        inputs = token_ids[:, :-1]
+        logits = self.model(inputs)
+        loss = cross_entropy_loss(logits, token_ids)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
+        self._update_lr()
+        self.optimizer.step()
+        self.step += 1
+        return loss.item()
 
     def train(self, data_iter: Iterator[torch.Tensor]) -> Iterator[tuple[int, float]]:
         """
