@@ -48,7 +48,7 @@ class TestTopKFilter:
         logits = torch.tensor([[0.1, 0.5, 0.9, 0.2]])
         result = _skip_if_stub(top_k_filter, logits, k=1)
         # Only the argmax (index 2) should survive
-        assert result[0, 2].item() == 0.9
+        assert result[0, 2].item() == pytest.approx(0.9)
         for i in [0, 1, 3]:
             assert result[0, i].item() == float("-inf")
 

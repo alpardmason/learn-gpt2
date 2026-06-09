@@ -80,12 +80,9 @@ def top_k_filter(logits: torch.Tensor, k: int) -> torch.Tensor:
     2. Create a mask: positions where logits < threshold → True.
     3. Use masked_fill to set those positions to -inf.
     """
-    raise NotImplementedError(
-        "Task 13a: Implement top_k_filter.\n"
-        "  values, _ = torch.topk(logits, k, dim=-1)\n"
-        "  threshold  = values[..., -1:]\n"
-        "  return logits.masked_fill(logits < threshold, float('-inf'))"
-    )
+    values, _ = torch.topk(logits, k, dim=-1)
+    threshold = values[..., -1:]
+    return logits.masked_fill(logits < threshold, float("-inf"))
 
 
 # ===========================================================================
@@ -130,17 +127,12 @@ def top_p_filter(logits: torch.Tensor, p: float) -> torch.Tensor:
     4. Scatter the mask back to the original (unsorted) order.
     5. Apply mask: set removed tokens to -inf.
     """
-    raise NotImplementedError(
-        "Task 13b: Implement top_p_filter.\n"
-        "  sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)\n"
-        "  sorted_probs = F.softmax(sorted_logits, dim=-1)\n"
-        "  cum_probs    = torch.cumsum(sorted_probs, dim=-1)\n"
-        "  # Shift right so the token that pushes over p is included\n"
-        "  remove = (cum_probs - sorted_probs) > p\n"
-        "  sorted_logits = sorted_logits.masked_fill(remove, float('-inf'))\n"
-        "  # Unsort: scatter back to original token order\n"
-        "  return sorted_logits.scatter(-1, sorted_idx, sorted_logits)"
-    )
+    sorted_logits, sorted_idx = torch.sort(logits, descending=True, dim=-1)
+    sorted_probs = torch.softmax(sorted_logits, dim=-1)
+    cum_probs = torch.cumsum(sorted_probs, dim=-1)
+    remove = (cum_probs - sorted_probs) > p
+    sorted_logits = sorted_logits.masked_fill(remove, float("-inf"))
+    return sorted_logits.scatter(-1, sorted_idx, sorted_logits)
 
 
 # ===========================================================================
@@ -207,11 +199,21 @@ def generate(
       8. Sample: probs = softmax(logits); next_id = multinomial(probs, 1).
       9. Append next_id to idx and continue.
     """
-    raise NotImplementedError(
-        "Task 13c: Implement the generate function.\n"
-        "  Key calls:\n"
-        "    idx_crop = idx[:, -model.config.n_ctx:]\n"
-        "    next_id  = torch.multinomial(probs, num_samples=1)\n"
-        "    idx      = torch.cat([idx, next_id], dim=1)\n"
-        "  Remember: @torch.inference_mode() is already applied by the decorator."
-    )
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    for _ in range(max_new_tokens):
+        idx_crop = idx[:, -model.config.n_ctx :]
+        logits = model(idx_crop)[:, -1, :]
+        if temperature == 0.0:
+            next_id = logits.argmax(dim=-1, keepdim=True)
+        else:
+            logits = logits / temperature
+            if top_k is not None:
+                logits = top_k_filter(logits, top_k)
+            if top_p is not None:
+                logits = top_p_filter(logits, top_p)
+            probs = torch.softmax(logits, dim=-1)
+            next_id = torch.multinomial(probs, num_samples=1)
+        idx = torch.cat([idx, next_id], dim=1)
+    return idx
